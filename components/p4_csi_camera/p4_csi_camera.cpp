@@ -201,6 +201,7 @@ void P4CsiCamera::set_raw_streaming(RawVideoSink *sink, bool on) {
 void P4CsiCamera::dump_config() {
   ESP_LOGCONFIG(TAG, "MIPI-CSI camera '%s':", this->get_name().c_str());
   ESP_LOGCONFIG(TAG, "  Sensor: OV02C10 at 0x%02X on the shared I2C bus", SENSOR_ADDR);
+  ESP_LOGCONFIG(TAG, "  Exposure ceiling: %u ms", (unsigned) (this->max_exposure_us_ / 1000));
   ESP_LOGCONFIG(TAG, "  Mode: %s", this->sensor_mode_ == SENSOR_MODE_1288X728 ? "1288x728, one lane"
                                                                               : "1920x1080, two lanes");
   ESP_LOGCONFIG(TAG, "  JPEG quality: %d", this->jpeg_quality_);
@@ -249,6 +250,9 @@ bool P4CsiCamera::ensure_video_init_() {
   esp_video_init_config_t config = {};
   config.csi = &csi;
 
+  // The exposure ceiling: the driver advertises it to auto exposure, and the
+  // ISP pipeline reads the range exactly once, here.
+  ov02c10_set_exposure_ceiling_us(this->max_exposure_us_);
   const esp_err_t init = esp_video_init(&config);
   if (init != ESP_OK) {
     ESP_LOGE(TAG, "esp_video_init failed: %s", esp_err_to_name(init));
@@ -351,6 +355,17 @@ void P4CsiCamera::set_test_pattern(int pattern) {
     return;
   }
   ESP_LOGI(TAG, "test pattern %d (reg 0x4503 = 0x%02X)", pattern, value);
+}
+
+void P4CsiCamera::write_register(uint16_t reg, uint8_t value) {
+  const uint8_t write[3] = {(uint8_t) (reg >> 8), (uint8_t) reg, value};
+  if (this->i2c_bus_->write_readv(SENSOR_ADDR, write, 3, nullptr, 0) != i2c::ERROR_OK) {
+    ESP_LOGW(TAG, "could not write sensor register 0x%04X", reg);
+    return;
+  }
+  uint8_t back = 0;
+  this->i2c_bus_->write_readv(SENSOR_ADDR, write, 2, &back, 1);
+  ESP_LOGI(TAG, "sensor register 0x%04X = 0x%02X (read back 0x%02X)", reg, value, back);
 }
 
 /* ---------------- capture task ---------------- */
@@ -641,8 +656,10 @@ void P4CsiCamera::close_session_() {
       ctls.ctrl_class = V4L2_CTRL_CLASS_USER;
       ctls.controls = &ctl[1];
       const bool have_gain = ioctl(this->cap_fd_, VIDIOC_G_EXT_CTRLS, &ctls) == 0;
-      ESP_LOGI(TAG, "auto exposure ended at exposure %s%ld, gain index %s%ld", have_exp ? "" : "?",
-               (long) ctl[0].value, have_gain ? "" : "?", (long) ctl[1].value);
+      uint32_t ceiling_us = 0;
+      esp_video_isp_pipeline_get_agc_max_exposure(&ceiling_us);
+      ESP_LOGI(TAG, "auto exposure ended at exposure %s%ld, gain index %s%ld (ceiling %u us)", have_exp ? "" : "?",
+               (long) ctl[0].value, have_gain ? "" : "?", (long) ctl[1].value, (unsigned) ceiling_us);
       // And what the sensor itself holds, read back over I2C: exposure at
       // 0x3500..0x3502, analogue gain at 0x3508:0x3509, digital gain at
       // 0x350a..0x350c. If these do not follow the values above, the gain

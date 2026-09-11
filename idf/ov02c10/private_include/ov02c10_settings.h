@@ -228,7 +228,7 @@ static const ov02c10_reginfo_t ov02c10_input_24M_MIPI_1lane_raw10_1288x728_30fps
      {0x4000, 0xc3},
      {0x4001, 0xe0},
      {0x4002, 0x00},
-     {0x4003, 0x40},
+     {0x4003, 0x00}, // black-level target: 0, not 64 (10-bit). The ISP on ESP32-P4 before v3.0 has no BLC block, so a pedestal here reaches the picture as grey.
      {0x4008, 0x04},
      {0x4009, 0x23},
      {0x400a, 0x04},
@@ -456,7 +456,7 @@ static const ov02c10_reginfo_t ov02c10_input_24M_MIPI_1lane_raw10_1920x1080_30fp
      {0x4000, 0xc3},
      {0x4001, 0xe0},
      {0x4002, 0x00},
-     {0x4003, 0x40},
+     {0x4003, 0x00}, // black-level target: 0, not 64 (10-bit). The ISP on ESP32-P4 before v3.0 has no BLC block, so a pedestal here reaches the picture as grey.
      {0x4008, 0x04},
      {0x4009, 0x23},
      {0x400a, 0x04},
@@ -697,7 +697,7 @@ static const ov02c10_reginfo_t ov02c10_input_24M_MIPI_2lane_raw10_1920x1080_30fp
      {0X4000, 0Xc3},
      {0X4001, 0Xe0},
      {0X4002, 0X00},
-     {0X4003, 0X40},
+     {0X4003, 0X00}, // black-level target: 0, not 64 (10-bit). The ISP on ESP32-P4 before v3.0 has no BLC block, so a pedestal here reaches the picture as grey.
      {0X4008, 0X04},
      {0X4009, 0X23},
      {0X400a, 0X04},

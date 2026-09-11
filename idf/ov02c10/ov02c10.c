@@ -88,6 +88,30 @@ struct ov02c10_cam {
 
 
 static const uint8_t s_ov02c10_exp_min = 0x08;
+
+// Exposure ceiling asked for by the application, in microseconds; 0 means the
+// timing table's own limit. Read at the moment the ISP pipeline queries the
+// exposure range, so it must be set before esp_video_init().
+static uint32_t s_exposure_ceiling_us = 0;
+
+void ov02c10_set_exposure_ceiling_us(uint32_t us)
+{
+    s_exposure_ceiling_us = us;
+}
+
+/// Longest exposure, in lines, for a format: the timing table's VTS less the
+/// sensor's margin, or the application's ceiling if that is lower.
+static uint32_t ov02c10_exposure_max_lines(const esp_cam_sensor_format_t *format)
+{
+    uint32_t lines = format->isp_info->isp_v1_info.vts - OV02C10_EXP_MAX_OFFSET;
+    if (s_exposure_ceiling_us != 0 && format->isp_info->isp_v1_info.tline_ns != 0) {
+        uint32_t ceiling = (uint32_t)(((uint64_t)s_exposure_ceiling_us * 1000) / format->isp_info->isp_v1_info.tline_ns);
+        if (ceiling < lines) {
+            lines = ceiling;
+        }
+    }
+    return lines;
+}
 static const uint32_t s_limited_gain = CONFIG_CAMERA_OV02C10_ABSOLUTE_GAIN_LIMIT;
 static size_t s_limited_gain_index;
 
@@ -626,11 +650,12 @@ static const esp_cam_sensor_isp_info_t ov02c10_isp_info[] = {
              // halves the line time the ISP pipeline uses to turn exposure
              // registers into microseconds, and doubles the exposure ceiling it
              // believes the sensor has.
-             // Twice the frame the register table programs (1164). The sensor
-            // stretches the frame when exposure exceeds it, so auto exposure can
-            // reach 64 ms in a dim room at the cost of 15 fps there, while bright
-            // scenes stay at 30 fps.
-            .vts = 2328,
+            // Three times the frame the register table programs (1164). The
+            // sensor stretches the frame when exposure exceeds it, so this is
+            // the ceiling auto exposure may reach: 3594 lines, 100 ms, 10 fps.
+            // The camera component lowers the ceiling at run time to what its
+            // max_exposure option allows; bright scenes stay at 30 fps.
+            .vts = 3600,
              .hts = 2280,
              .tline_ns = 27918, // hts / pclk: 2280 px at 81.6667 MHz
              .gain_def = 0x01,
@@ -900,14 +925,14 @@ static esp_err_t ov02c10_query_para_desc(esp_cam_sensor_device_t *dev, esp_cam_s
     case ESP_CAM_SENSOR_EXPOSURE_VAL:
         qdesc->type = ESP_CAM_SENSOR_PARAM_TYPE_NUMBER;
         qdesc->number.minimum = s_ov02c10_exp_min;
-        qdesc->number.maximum = dev->cur_format->isp_info->isp_v1_info.vts - OV02C10_EXP_MAX_OFFSET; // max = VTS-6 = height+vblank-6, so when update vblank, exposure_max must be updated
+        qdesc->number.maximum = ov02c10_exposure_max_lines(dev->cur_format);
         qdesc->number.step = 1;
         qdesc->default_value = dev->cur_format->isp_info->isp_v1_info.exp_def;
         break;
     case ESP_CAM_SENSOR_EXPOSURE_US:
         qdesc->type = ESP_CAM_SENSOR_PARAM_TYPE_NUMBER;
         qdesc->number.minimum = EXPOSURE_OV02C10_TO_V4L2(s_ov02c10_exp_min, dev->cur_format);
-        qdesc->number.maximum = EXPOSURE_OV02C10_TO_V4L2((dev->cur_format->isp_info->isp_v1_info.vts - OV02C10_EXP_MAX_OFFSET), dev->cur_format); // max = VTS-6 = height+vblank-6, so when update vblank, exposure_max must be updated
+        qdesc->number.maximum = EXPOSURE_OV02C10_TO_V4L2(ov02c10_exposure_max_lines(dev->cur_format), dev->cur_format);
         qdesc->number.step = MAX(EXPOSURE_OV02C10_TO_V4L2(0x01, dev->cur_format), 1);
         qdesc->default_value = EXPOSURE_OV02C10_TO_V4L2((dev->cur_format->isp_info->isp_v1_info.exp_def), dev->cur_format);
         break;
@@ -1265,7 +1290,7 @@ static esp_err_t ov02c10_set_format(esp_cam_sensor_device_t *dev, const esp_cam_
     // init para
     cam_ov02c10->ov02c10_para.exposure_val = dev->cur_format->isp_info->isp_v1_info.exp_def;
     cam_ov02c10->ov02c10_para.gain_index = dev->cur_format->isp_info->isp_v1_info.gain_def;
-    cam_ov02c10->ov02c10_para.exposure_max = dev->cur_format->isp_info->isp_v1_info.vts - OV02C10_EXP_MAX_OFFSET;
+    cam_ov02c10->ov02c10_para.exposure_max = ov02c10_exposure_max_lines(dev->cur_format);
 
     return ret;
 }

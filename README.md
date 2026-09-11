@@ -38,6 +38,8 @@ p4_csi_camera:
   jpeg_quality: 50           # 1..100; 1080p is ~110 KB at 50
   resolution: 1920x1080      # or 1288x728 (one MIPI lane, Guition's own choice)
   max_framerate: 3 fps       # ceiling on frames handed to the API while streaming
+  max_exposure: 100ms        # longest exposure; above 33 ms the sensor stretches the
+                             # frame, so this is also the frame rate floor in dim light
   settle_frames: 24          # frames given to auto exposure before the first still
   horizontal_mirror: false
   vertical_flip: false
@@ -48,7 +50,8 @@ The full example, with the board's PSRAM and I²C, is in `example/camera.yaml`.
 `tools/camtest.py` exercises the entity the way Home Assistant does: stills and
 a stream over the native API, with the JPEGs written out to look at.
 
-Two diagnostics are exposed for lambdas: `probe()` lists the V4L2 devices, and
+Three diagnostics are exposed for lambdas: `probe()` lists the V4L2 devices,
+`write_register(reg, value)` writes one sensor register and reads it back, and
 `gain_sweep()` pauses auto exposure, writes exposure and gain registers
 straight to the sensor and logs the frame's mean luma at each step. That sweep
 is how the gain register finding above was made; the session-close log line
@@ -77,9 +80,17 @@ idf/ov02c10/                the OV02C10 driver, as an ESP-IDF component
   picture, while `0x350a:0x350b` (the Linux driver's "digital gain") does.
   The table is regenerated to drive that register from 1× to 15.9×; upstream
   declared 63× and delivered about 4×;
-- the two-lane mode allows exposures up to 64 ms: the sensor stretches the
-  frame when exposure exceeds it, so a dim room drops to 15 fps rather than
-  going black, and bright scenes stay at 30 fps;
+- the sensor's black-level target (`0x4003`) is set to 0 instead of 64. The
+  ISP's black-level correction block exists only on ESP32-P4 silicon v3.0 and
+  later (the IDF driver refuses it on earlier chips, and esp_video compiles it
+  out), so on a v1.x chip the pedestal reached the picture: every black was
+  a mid grey, the whole image sat between 58 and 96 of 255, and gamma then
+  stretched the noise. With it gone, blacks are black and white balance sees
+  the true signal;
+- the two-lane mode allows exposures up to 100 ms: the sensor stretches the
+  frame when exposure exceeds it, so a dim room drops to 10 fps rather than
+  going black, and bright scenes stay at 30 fps. The `max_exposure` option
+  lowers that ceiling for anyone who would rather keep the frame rate;
 - the two-lane 1080p timing entry lists what its own register table programs;
 - `tline_ns` is filled in, without which the auto-gain algorithm sees an
   exposure range of 0..0 and esp_video refuses to start;
@@ -90,10 +101,11 @@ It is built as an ESP-IDF component rather than as ESPHome source so that its
 ISP tuning file is compiled in: `esp_ipa` collects those through a component's
 `project_include.cmake`. With it, esp_video runs auto exposure, white balance,
 colour correction and gamma. The tuning file's white-balance window was
-widened from the upstream daylight-only window, metering switched from
-highlight priority (a ceiling lamp set the exposure) to low-light priority,
-and the colour matrix set to identity, which measured most neutral on this
-module.
+widened from the upstream daylight-only window and its floor lowered so that
+a dim frame still yields enough samples to balance (without that, a dark room
+stayed green), metering switched from highlight priority (a ceiling lamp set
+the exposure) to low-light priority, and the colour matrix set to identity,
+which measured most neutral on this module.
 
 ### The capture path
 

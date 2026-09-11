@@ -9,7 +9,7 @@
             "range": {
                 "green": {
                     "max": 230,
-                    "min": 40
+                    "min": 8
                 },
                 "rg": {
                     "max": 1.6,
@@ -426,15 +426,15 @@
                     "value": 132
                 },
                 {
-                    "gain": 16,
+                    "gain": 4,
                     "value": 130
                 },
                 {
-                    "gain": 24,
+                    "gain": 8,
                     "value": 128
                 },
                 {
-                    "gain": 65,
+                    "gain": 16,
                     "value": 126
                 }
             ]

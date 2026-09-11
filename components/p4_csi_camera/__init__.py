@@ -42,6 +42,7 @@ CONF_INIT_LDO = "init_ldo"
 CONF_JPEG_QUALITY = "jpeg_quality"
 CONF_MAX_FRAMERATE = "max_framerate"
 CONF_SETTLE_FRAMES = "settle_frames"
+CONF_MAX_EXPOSURE = "max_exposure"
 CONF_HORIZONTAL_MIRROR = "horizontal_mirror"
 CONF_VERTICAL_FLIP = "vertical_flip"
 
@@ -95,6 +96,16 @@ CONFIG_SCHEMA = cv.All(
             # the stream starts, and in a dim room it needs the better part of
             # a second to climb to the right gain.
             cv.Optional(CONF_SETTLE_FRAMES, default=24): cv.int_range(min=0, max=90),
+            # Longest exposure auto exposure may use. The sensor runs at 30 fps
+            # until exposure exceeds a frame (33 ms), then stretches the frame,
+            # so this is also the frame rate floor in a dim room: 100 ms is
+            # 10 fps, 66 ms is 15 fps with a third less light. Bright scenes
+            # are unaffected. The module's analogue gain does not work, so
+            # exposure is most of what low light has.
+            cv.Optional(CONF_MAX_EXPOSURE, default="100ms"): cv.All(
+                cv.positive_time_period_microseconds,
+                cv.Range(min=cv.TimePeriod(milliseconds=1), max=cv.TimePeriod(milliseconds=100)),
+            ),
             # Sensor-side mirror and flip, for however the module is mounted.
             cv.Optional(CONF_HORIZONTAL_MIRROR, default=False): cv.boolean,
             cv.Optional(CONF_VERTICAL_FLIP, default=False): cv.boolean,
@@ -117,6 +128,7 @@ async def to_code(config):
     cg.add(var.set_sensor_mode(config[CONF_RESOLUTION]))
     cg.add(var.set_max_update_interval(int(1000 / config[CONF_MAX_FRAMERATE])))
     cg.add(var.set_settle_frames(config[CONF_SETTLE_FRAMES]))
+    cg.add(var.set_max_exposure_us(config[CONF_MAX_EXPOSURE].total_microseconds))
     cg.add(var.set_mirror(config[CONF_HORIZONTAL_MIRROR], config[CONF_VERTICAL_FLIP]))
 
     esp32.add_idf_component(name="espressif/esp_video", ref="2.4.1")

@@ -102,6 +102,7 @@ class P4CsiCamera : public camera::Camera {
   void set_sensor_mode(SensorMode mode) { this->sensor_mode_ = mode; }
   void set_max_update_interval(uint32_t ms) { this->max_update_interval_ = ms; }
   void set_settle_frames(int frames) { this->settle_frames_ = frames; }
+  void set_max_exposure_us(uint32_t us) { this->max_exposure_us_ = us; }
   void set_mirror(bool horizontal, bool vertical) {
     this->hmirror_ = horizontal;
     this->vflip_ = vertical;
@@ -120,6 +121,10 @@ class P4CsiCamera : public camera::Camera {
   /// few known values at fixed exposure and logs the frame luma at each, to
   /// show whether gain writes have any effect. Runs on the capture task.
   void gain_sweep() { this->sweep_requested_ = true; if (this->task_ != nullptr) xTaskNotifyGive(this->task_); }
+
+  /// Diagnostic: writes one sensor register over I2C and logs the value read
+  /// back. For trying a register's effect on the live picture.
+  void write_register(uint16_t reg, uint8_t value);
 
   /// Registers a consumer of raw ISP frames. Up to 8; call during setup.
   void add_raw_sink(RawVideoSink *sink);
@@ -168,6 +173,7 @@ class P4CsiCamera : public camera::Camera {
   SensorMode sensor_mode_{SENSOR_MODE_1920X1080};
   uint32_t max_update_interval_{333};
   int settle_frames_{24};
+  uint32_t max_exposure_us_{100000};
   bool hmirror_{false};
   bool vflip_{false};
 

@@ -25,4 +25,5 @@ p4_csi_camera:
   jpeg_quality: 50
   resolution: 1920x1080      # or 1288x728
   max_framerate: 3 fps       # ceiling for frames handed to the API while streaming
+  max_exposure: 100ms        # low-light frame rate floor: 100 ms is 10 fps, 66 ms is 15 fps
   horizontal_mirror: true    # as mounted in the panel, the image reads mirrored

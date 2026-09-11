@@ -23,6 +23,17 @@ extern "C" {
 esp_cam_sensor_device_t *ov02c10_detect(esp_cam_sensor_config_t *config);
 
 /**
+ * @brief Cap the exposure range the driver advertises to auto exposure.
+ *
+ * The two-lane 1080p timing lets the sensor stretch a frame to 100 ms. The ISP
+ * pipeline reads the exposure range once, when esp_video_init() runs, so call
+ * this before that. 0 restores the timing table's own limit.
+ *
+ * @param[in] us Longest exposure in microseconds.
+ */
+void ov02c10_set_exposure_ceiling_us(uint32_t us);
+
+/**
  * @brief Look up one of the driver's built-in output formats, for VIDIOC_S_SENSOR_FMT.
  *
  * @param[in] index Position in the driver's format table: 0 = 1288x728 one lane,
