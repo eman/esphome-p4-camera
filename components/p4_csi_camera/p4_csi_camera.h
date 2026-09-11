@@ -116,6 +116,11 @@ class P4CsiCamera : public camera::Camera {
   /// depending on optics or exposure. Takes effect on the next frame.
   void set_test_pattern(int pattern);
 
+  /// Diagnostic: with auto exposure paused, steps the sensor gain through a
+  /// few known values at fixed exposure and logs the frame luma at each, to
+  /// show whether gain writes have any effect. Runs on the capture task.
+  void gain_sweep() { this->sweep_requested_ = true; if (this->task_ != nullptr) xTaskNotifyGive(this->task_); }
+
   /// Registers a consumer of raw ISP frames. Up to 8; call during setup.
   void add_raw_sink(RawVideoSink *sink);
   /// While any registered sink has streaming on, the capture session stays
@@ -176,6 +181,9 @@ class P4CsiCamera : public camera::Camera {
   /// Set by the main loop when it can take a frame; the capture task grabs one
   /// frame per set, so nothing is ever produced that the loop did not ask for.
   std::atomic<bool> frame_wanted_{false};
+  std::atomic<bool> sweep_requested_{false};
+  void run_gain_sweep_();
+  uint32_t measure_luma_(int frames);
   /// One bit per registered raw sink that currently wants frames.
   std::atomic<uint8_t> raw_active_{0};
   std::vector<RawVideoSink *> raw_sinks_;

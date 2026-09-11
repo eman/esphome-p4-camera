@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
+#include "esp_video_isp_pipeline.h"
 #include "hal/isp_ll.h"
 #include "ov02c10.h"
 
@@ -366,6 +367,12 @@ void P4CsiCamera::capture_loop_() {
     if (!raw)
       ulTaskNotifyTake(pdTRUE, open ? pdMS_TO_TICKS(100) : portMAX_DELAY);
 
+    if (this->sweep_requested_.exchange(false)) {
+      if (open || this->open_session_())
+        this->run_gain_sweep_();
+      continue;
+    }
+
     const bool want_jpeg = this->frame_wanted_;
     if (!want_jpeg && !raw) {
       if (open && millis() - this->last_request_ms_ > IDLE_CLOSE_MS) {
@@ -408,6 +415,70 @@ void P4CsiCamera::capture_loop_() {
     if (xQueueSend(this->frame_queue_, &frame, 0) != pdTRUE)
       heap_caps_free(frame.jpeg);
   }
+}
+
+/// Dequeues `frames` frames and returns the mean luma of the last one.
+uint32_t P4CsiCamera::measure_luma_(int frames) {
+  uint32_t luma = 0;
+  for (int f = 0; f < frames; f++) {
+    struct v4l2_buffer buf = {};
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    int rc = -1;
+    for (uint32_t waited = 0; waited < FRAME_WAIT_MS && rc != 0; waited += 10) {
+      rc = ioctl(this->cap_fd_, VIDIOC_DQBUF, &buf);
+      if (rc != 0)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (rc != 0)
+      return 0;
+    const uint8_t *data = this->cap_mem_[buf.index];
+    uint32_t sum = 0, n = 0;
+    for (size_t i = 1; i < buf.bytesused; i += 3 * 97) {
+      sum += data[i];
+      n++;
+    }
+    luma = n ? sum / n : 0;
+    ioctl(this->cap_fd_, VIDIOC_QBUF, &buf);
+  }
+  return luma;
+}
+
+void P4CsiCamera::run_gain_sweep_() {
+  // Auto exposure paused; registers written straight to the sensor, so what
+  // is measured is the sensor, not the driver's idea of it.
+  esp_video_isp_pipeline_set_agc_status(ESP_VIDEO_ISP_PIPELINE_AGC_DISABLE);
+  vTaskDelay(pdMS_TO_TICKS(100));
+  auto w = [&](uint16_t reg, uint8_t val) {
+    const uint8_t wr[3] = {(uint8_t) (reg >> 8), (uint8_t) reg, val};
+    this->i2c_bus_->write_readv(SENSOR_ADDR, wr, 3, nullptr, 0);
+  };
+  auto exposure = [&](uint32_t lines) {
+    w(0x3500, (uint8_t) (lines >> 16));
+    w(0x3501, (uint8_t) (lines >> 8));
+    w(0x3502, (uint8_t) lines);
+  };
+  auto gain = [&](uint16_t r3508, uint16_t r350a) {
+    w(0x3508, (uint8_t) (r3508 >> 8));
+    w(0x3509, (uint8_t) r3508);
+    w(0x350a, (uint8_t) (r350a >> 8));
+    w(0x350b, (uint8_t) r350a);
+  };
+  ESP_LOGI(TAG, "sweep: exposure in lines, gain 1x");
+  gain(0x0100, 0x0100);
+  for (uint32_t e : {64u, 1149u, 2313u, 4600u})
+    exposure(e), ESP_LOGI(TAG, "sweep:   exposure %5u lines -> luma %u", (unsigned) e, (unsigned) this->measure_luma_(6));
+  ESP_LOGI(TAG, "sweep: 0x350a:0x350b at 2313 lines");
+  exposure(2313);
+  for (uint16_t g : {0x0100, 0x0400, 0x0800, 0x0FF0})
+    gain(0x0100, g), ESP_LOGI(TAG, "sweep:   0x%04X -> luma %u", g, (unsigned) this->measure_luma_(6));
+  ESP_LOGI(TAG, "sweep: 0x3508:0x3509 at 2313 lines");
+  for (uint16_t g : {0x0100, 0x0800, 0x0F80})
+    gain(g, 0x0100), ESP_LOGI(TAG, "sweep:   0x%04X -> luma %u", g, (unsigned) this->measure_luma_(6));
+  gain(0x0100, 0x0100);
+  exposure(1149);
+  esp_video_isp_pipeline_set_agc_status(ESP_VIDEO_ISP_PIPELINE_AGC_ENABLE);
+  this->last_request_ms_ = millis();
 }
 
 void P4CsiCamera::drain_queue_() {
@@ -572,6 +643,23 @@ void P4CsiCamera::close_session_() {
       const bool have_gain = ioctl(this->cap_fd_, VIDIOC_G_EXT_CTRLS, &ctls) == 0;
       ESP_LOGI(TAG, "auto exposure ended at exposure %s%ld, gain index %s%ld", have_exp ? "" : "?",
                (long) ctl[0].value, have_gain ? "" : "?", (long) ctl[1].value);
+      // And what the sensor itself holds, read back over I2C: exposure at
+      // 0x3500..0x3502, analogue gain at 0x3508:0x3509, digital gain at
+      // 0x350a..0x350c. If these do not follow the values above, the gain
+      // writes are not landing.
+      {
+        uint8_t regs[13] = {};
+        bool ok = true;
+        for (int i = 0; i < 13 && ok; i++) {
+          const uint8_t reg[2] = {0x35, (uint8_t) i};
+          ok = this->i2c_bus_->write_readv(SENSOR_ADDR, reg, 2, &regs[i], 1) == i2c::ERROR_OK;
+        }
+        if (ok)
+          ESP_LOGI(TAG, "sensor registers: exposure 0x%02X%02X%02X, analogue gain 0x%02X%02X, digital gain 0x%02X%02X%02X",
+                   regs[0], regs[1], regs[2], regs[8], regs[9], regs[10], regs[11], regs[12]);
+        else
+          ESP_LOGW(TAG, "could not read the sensor's exposure and gain registers back");
+      }
 
       // Read before STREAMOFF: it deletes the ISP processor, and the raw
       // status is only meaningful while the block is clocked.
@@ -876,6 +964,17 @@ int P4CsiCamera::grab_frame_(Frame *out, bool want_jpeg) {
 
     int result = 0;
     if (want_jpeg) {
+      // Mean luma of the frame, sampled, so brightness can be judged from the
+      // log without moving the picture anywhere. YUV 4:2:0 here is packed
+      // U Y Y / V Y Y per line, so two of every three bytes are luma.
+      if (this->pixfmt_ == V4L2_PIX_FMT_YUV420) {
+        uint32_t sum = 0, n = 0;
+        for (size_t i = 1; i < buf.bytesused; i += 3 * 97) {
+          sum += data[i];
+          n++;
+        }
+        ESP_LOGI(TAG, "frame luma: mean %u of 255 (%u samples)", (unsigned) (n ? sum / n : 0), (unsigned) n);
+      }
       // Snapshot who asked before the encode, so a request that arrives during
       // it is answered by the next frame rather than lost.
       const uint8_t requesters = this->single_requesters_ | this->stream_requesters_;

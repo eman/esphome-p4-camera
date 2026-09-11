@@ -48,6 +48,12 @@ The full example, with the board's PSRAM and I²C, is in `example/camera.yaml`.
 `tools/camtest.py` exercises the entity the way Home Assistant does: stills and
 a stream over the native API, with the JPEGs written out to look at.
 
+Two diagnostics are exposed for lambdas: `probe()` lists the V4L2 devices, and
+`gain_sweep()` pauses auto exposure, writes exposure and gain registers
+straight to the sensor and logs the frame's mean luma at each step. That sweep
+is how the gain register finding above was made; the session-close log line
+reports where auto exposure landed and reads the sensor's registers back.
+
 ## What is in here
 
 ```
@@ -65,8 +71,15 @@ idf/ov02c10/                the OV02C10 driver, as an ESP-IDF component
 
 - the grouped exposure/gain update read a field esp_video leaves at zero, so
   exposure sat at the 8-line minimum whatever the light;
-- the gain table was not this sensor's (6× where it claimed 63×); it is
-  regenerated from the register layout the Linux driver uses, 1× to 62×;
+- the gain table was not this sensor's, and neither, on this module, is the
+  Linux driver's analogue gain register: written in every encoding and
+  mode-register setting tried, `0x3508:0x3509` changes nothing in the
+  picture, while `0x350a:0x350b` (the Linux driver's "digital gain") does.
+  The table is regenerated to drive that register from 1× to 15.9×; upstream
+  declared 63× and delivered about 4×;
+- the two-lane mode allows exposures up to 64 ms: the sensor stretches the
+  frame when exposure exceeds it, so a dim room drops to 15 fps rather than
+  going black, and bright scenes stay at 30 fps;
 - the two-lane 1080p timing entry lists what its own register table programs;
 - `tline_ns` is filled in, without which the auto-gain algorithm sees an
   exposure range of 0..0 and esp_video refuses to start;
