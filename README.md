@@ -158,6 +158,13 @@ Raw frames are available to other components through `RawVideoSink`
 (`raw_video.h`): register a sink, ask for streaming, and every frame the sensor
 produces is delivered on the capture task while the request stands.
 
+A sink that encodes does so on that task, so the session runs four capture
+buffers rather than two. With two, the sensor has nowhere to put a frame while
+the encoder works and the two serialise: measured with the H.264 encoder at
+1080p, 8 frames a second where each part alone could do 12 or more. With four,
+whichever is slower sets the rate: 11.3 frames a second, the encoder's. The
+extra buffers are 3 MB each and live in PSRAM.
+
 ## Two things that cost days, recorded so they do not cost yours
 
 - **ESP-IDF 5.5.5's ISP driver logs its error interrupts from inside the

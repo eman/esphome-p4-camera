@@ -214,7 +214,13 @@ class P4CsiCamera : public camera::Camera {
   uint32_t frames_published_{0};
 
   // Capture-task side: the open V4L2 session, if any.
-  static constexpr uint32_t CAPTURE_BUFFERS = 2;
+  // Four, not two. A raw consumer encodes on this task, and at 1080p the
+  // hardware H.264 encoder takes 40-80 ms; with only two buffers the sensor
+  // has nowhere to put a frame while that runs, so exposure and encoding
+  // serialise and the stream settles at 1/(exposure + encode). A third and
+  // fourth buffer let the sensor keep filling, and the rate becomes whichever
+  // of the two is slower. They cost 3 MB each, in PSRAM.
+  static constexpr uint32_t CAPTURE_BUFFERS = 4;
   int cap_fd_{-1};
   uint8_t *cap_mem_[CAPTURE_BUFFERS] = {};
   size_t cap_len_[CAPTURE_BUFFERS] = {};
