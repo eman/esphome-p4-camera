@@ -1,0 +1,28 @@
+# The camera on a Guition JC1060P470, as this component was developed on it.
+# The sensor's SCCB shares the I2C bus with the GT911 touch controller.
+external_components:
+  - source: github://eman/esphome-p4-camera
+
+esp32:
+  variant: esp32p4
+  framework:
+    type: esp-idf
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+i2c:
+  - id: bus_a
+    sda: GPIO07
+    scl: GPIO08
+    frequency: 400kHz
+
+p4_csi_camera:
+  id: cam
+  name: Camera
+  i2c_id: bus_a
+  jpeg_quality: 50
+  resolution: 1920x1080      # or 1288x728
+  max_framerate: 3 fps       # ceiling for frames handed to the API while streaming
+  horizontal_mirror: true    # as mounted in the panel, the image reads mirrored

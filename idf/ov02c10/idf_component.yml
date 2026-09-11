@@ -1,0 +1,6 @@
+description: OV02C10 MIPI-CSI camera sensor driver for esp_cam_sensor
+version: 0.1.0
+dependencies:
+  idf: ">=5.5"
+  espressif/esp_cam_sensor: "2.4.*"
+  espressif/esp_sccb_intf: ">=0.0.5"
