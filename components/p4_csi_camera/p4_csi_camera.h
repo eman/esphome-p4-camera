@@ -126,6 +126,12 @@ class P4CsiCamera : public camera::Camera {
   /// back. For trying a register's effect on the live picture.
   void write_register(uint16_t reg, uint8_t value);
 
+  /// Diagnostic: logs the ISP's own auto-exposure statistics - the 5x5 grid of
+  /// block luminance the exposure algorithm meters on - alongside the exposure
+  /// and gain it has chosen. Shows what auto exposure sees, rather than what
+  /// the finished picture looks like. Runs on the capture task.
+  void ae_stats() { this->ae_stats_requested_ = true; if (this->task_ != nullptr) xTaskNotifyGive(this->task_); }
+
   /// Registers a consumer of raw ISP frames. Up to 8; call during setup.
   void add_raw_sink(RawVideoSink *sink);
   /// While any registered sink has streaming on, the capture session stays
@@ -172,7 +178,7 @@ class P4CsiCamera : public camera::Camera {
   int jpeg_quality_{30};
   SensorMode sensor_mode_{SENSOR_MODE_1920X1080};
   uint32_t max_update_interval_{333};
-  int settle_frames_{24};
+  int settle_frames_{150};
   uint32_t max_exposure_us_{100000};
   bool hmirror_{false};
   bool vflip_{false};
@@ -188,7 +194,14 @@ class P4CsiCamera : public camera::Camera {
   /// frame per set, so nothing is ever produced that the loop did not ask for.
   std::atomic<bool> frame_wanted_{false};
   std::atomic<bool> sweep_requested_{false};
+  std::atomic<bool> ae_stats_requested_{false};
   void run_gain_sweep_();
+  void run_ae_stats_();
+  bool ae_has_settled_();
+  bool ae_settled_{false};
+  uint32_t settle_stable_{0};
+  uint32_t settle_exposure_{0};
+  uint32_t settle_gain_{0};
   uint32_t measure_luma_(int frames);
   /// One bit per registered raw sink that currently wants frames.
   std::atomic<uint8_t> raw_active_{0};

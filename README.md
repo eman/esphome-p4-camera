@@ -40,7 +40,7 @@ p4_csi_camera:
   max_framerate: 3 fps       # ceiling on frames handed to the API while streaming
   max_exposure: 100ms        # longest exposure; above 33 ms the sensor stretches the
                              # frame, so this is also the frame rate floor in dim light
-  settle_frames: 24          # frames given to auto exposure before the first still
+  settle_frames: 150         # cap on frames dropped while auto exposure settles
   horizontal_mirror: false
   vertical_flip: false
 ```
@@ -50,12 +50,16 @@ The full example, with the board's PSRAM and I²C, is in `example/camera.yaml`.
 `tools/camtest.py` exercises the entity the way Home Assistant does: stills and
 a stream over the native API, with the JPEGs written out to look at.
 
-Three diagnostics are exposed for lambdas: `probe()` lists the V4L2 devices,
-`write_register(reg, value)` writes one sensor register and reads it back, and
+Four diagnostics are exposed for lambdas: `probe()` lists the V4L2 devices,
+`write_register(reg, value)` writes one sensor register and reads it back,
 `gain_sweep()` pauses auto exposure, writes exposure and gain registers
-straight to the sensor and logs the frame's mean luma at each step. That sweep
-is how the gain register finding above was made; the session-close log line
-reports where auto exposure landed and reads the sensor's registers back.
+straight to the sensor and logs the frame's mean luma at each step, and
+`ae_stats()` logs what auto exposure actually meters: the ISP's 5×5 grid of
+block luminance, the histogram and the white-balance statistics, once per
+round over eight rounds so the convergence is visible. Those two are how the
+gain register and auto exposure findings below were made; the session-close
+log line reports where auto exposure landed and reads the sensor's registers
+back.
 
 ## What is in here
 
@@ -100,14 +104,44 @@ idf/ov02c10/                the OV02C10 driver, as an ESP-IDF component
 It is built as an ESP-IDF component rather than as ESPHome source so that its
 ISP tuning file is compiled in: `esp_ipa` collects those through a component's
 `project_include.cmake`. With it, esp_video runs auto exposure, white balance,
-colour correction and gamma. The tuning file's white-balance window was
-widened from the upstream daylight-only window and its floor lowered so that
-a dim frame still yields enough samples to balance (without that, a dark room
-stayed green), metering switched from highlight priority (a ceiling lamp set
-the exposure) to low-light priority, and the colour matrix set to identity,
-which measured most neutral on this module.
+colour correction and gamma. Four things in that file were changed, each
+measured on the module:
 
-### The capture path
+- **The white-balance gain step.** Upstream discards a red or blue gain change
+  smaller than 0.34; Espressif's own tuning files use 0.0033, a hundred times
+  finer. At 0.34 the algorithm can only ever make enormous jumps, so it never
+  converges and every picture keeps a green cast. This is the single change
+  that fixed the colour.
+- **The white-balance window**, widened from the upstream daylight-only one and
+  its floor lowered, so a dim frame still yields enough samples to balance.
+- **The exposure target**, 85 down to 60. The target is in the linear domain,
+  before the gamma curve; with the 0.518 gamma this file uses, 85 lands a
+  mid-grey at 147 of 255 and blows every highlight. 60 lands it near 108.
+- **Metering**, from highlight priority (a ceiling lamp set the exposure)
+  through low-light priority to `light_threshold_priority`, which weights
+  regions by their own brightness and so protects a window without giving up
+  on a dim room.
+
+The colour matrix is set to identity, which measured most neutral here.
+
+#### Auto exposure
+
+The tuning library's exposure algorithm restarts from the sensor's defaults at
+every `STREAMON`, and the first statistics it gets are of frames taken before
+any of its decisions applied. It therefore drives to the end of its range and
+comes back, taking anywhere from 20 frames in daylight to 80 in a dim room to
+settle. A still captured during that is blown white or black, whichever way
+the overshoot went, and that had nothing to do with the light in the room.
+
+So this component does not count frames and hope. It reads the sensor's own
+exposure and gain registers after each frame, drops frames until they have held
+still for eight in a row, and keeps the first frame after that; `settle_frames`
+only caps the wait. Sessions also outlive their last request by thirty seconds,
+so a Home Assistant poll every ten seconds reuses a settled session rather than
+paying for a cold one each time, and a camera nobody is watching still stops
+streaming within the minute.
+
+## The capture path
 
 The main loop only ever sets request flags and hands finished JPEGs to the
 API. A task on the second core owns the V4L2 session: it opens the pipeline on

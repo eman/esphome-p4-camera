@@ -3,8 +3,8 @@
     "OV02C10": {
         "awb": {
             "model": 0,
-            "min_red_gain_step": 0.34,
-            "min_blue_gain_step": 0.4,
+            "min_red_gain_step": 0.0033,
+            "min_blue_gain_step": 0.0033,
             "min_counted": 1000,
             "range": {
                 "green": {
@@ -40,9 +40,9 @@
             "f_n0": 0.32,
             "f_m0": 0.42,
             "luma_adjust": {
-                "target_low": 68,
-                "target_high": 110,
-                "target": 85,
+                "target_low": 50,
+                "target_high": 75,
+                "target": 60,
                 "low_threshold": 14,
                 "low_regions": 5,
                 "high_threshold": 239,
@@ -75,7 +75,7 @@
                     1
                 ]
             },
-            "mode": "low_light_priority",
+            "mode": "light_threshold_priority",
             "high_light_priority": {
                 "low_threshold": 119,
                 "high_threshold": 202,

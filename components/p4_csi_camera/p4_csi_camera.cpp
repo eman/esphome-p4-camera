@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
+#include "esp_video_isp_ioctl.h"
 #include "esp_video_isp_pipeline.h"
 #include "hal/isp_ll.h"
 #include "ov02c10.h"
@@ -35,11 +36,16 @@ static const char *const TAG = "p4_csi_camera";
 // product id, and this one is 0x5602.
 static const uint8_t SENSOR_ADDR = 0x36;
 static const uint16_t OV02C10_PID = 0x5602;
-// How long a session outlives the last request. Long enough that Home
-// Assistant's stream keep-alives (every 5 s from the API side) never see a
-// cold start; short enough that the sensor is not left streaming at 800 Mbps
-// for a still nobody asked for.
-static const uint32_t IDLE_CLOSE_MS = 6000;
+// How long a session outlives the last request. Auto exposure restarts from
+// the sensor's defaults at every STREAMON and takes a few seconds to settle,
+// so a session that closes between polls makes every picture a cold one.
+// Home Assistant's default still interval is 10 s; this keeps one poll's
+// session alive for the next, while a camera nobody is watching still stops
+// streaming at 800 Mbps within the minute.
+static const uint32_t IDLE_CLOSE_MS = 30000;
+// Frames the sensor's exposure and gain registers must hold still before auto
+// exposure counts as settled.
+static const uint32_t AE_STABLE_FRAMES = 8;
 // Bound on waiting for the pipeline. A dequeue that never returns is what
 // tripped the watchdog the first time, and "no frame arrived" is a result.
 static const uint32_t FRAME_WAIT_MS = 2000;
@@ -388,6 +394,12 @@ void P4CsiCamera::capture_loop_() {
       continue;
     }
 
+    if (this->ae_stats_requested_.exchange(false)) {
+      if (open || this->open_session_())
+        this->run_ae_stats_();
+      continue;
+    }
+
     const bool want_jpeg = this->frame_wanted_;
     if (!want_jpeg && !raw) {
       if (open && millis() - this->last_request_ms_ > IDLE_CLOSE_MS) {
@@ -430,6 +442,29 @@ void P4CsiCamera::capture_loop_() {
     if (xQueueSend(this->frame_queue_, &frame, 0) != pdTRUE)
       heap_caps_free(frame.jpeg);
   }
+}
+
+/// Reads the sensor's exposure and gain registers and reports whether they
+/// have stopped changing - which is what auto exposure having converged looks
+/// like from outside the tuning library. A bus error reports settled rather
+/// than holding a capture up forever.
+bool P4CsiCamera::ae_has_settled_() {
+  uint8_t regs[12] = {};
+  for (int i = 0; i < 12; i++) {
+    const uint8_t reg[2] = {0x35, (uint8_t) i};
+    if (this->i2c_bus_->write_readv(SENSOR_ADDR, reg, 2, &regs[i], 1) != i2c::ERROR_OK)
+      return true;
+  }
+  const uint32_t exposure = ((uint32_t) regs[0] << 16) | ((uint32_t) regs[1] << 8) | regs[2];
+  const uint32_t gain = ((uint32_t) regs[10] << 8) | regs[11];
+  if (exposure == this->settle_exposure_ && gain == this->settle_gain_) {
+    this->settle_stable_++;
+  } else {
+    this->settle_exposure_ = exposure;
+    this->settle_gain_ = gain;
+    this->settle_stable_ = 0;
+  }
+  return this->settle_stable_ >= AE_STABLE_FRAMES;
 }
 
 /// Dequeues `frames` frames and returns the mean luma of the last one.
@@ -493,6 +528,96 @@ void P4CsiCamera::run_gain_sweep_() {
   gain(0x0100, 0x0100);
   exposure(1149);
   esp_video_isp_pipeline_set_agc_status(ESP_VIDEO_ISP_PIPELINE_AGC_ENABLE);
+  this->last_request_ms_ = millis();
+}
+
+void P4CsiCamera::run_ae_stats_() {
+  // What the exposure algorithm meters on: the ISP's AE block averages each of
+  // 25 blocks of the frame and hands that grid to the tuning library, which
+  // weights it and drives exposure and gain at the target in its config. The
+  // finished picture goes through gamma afterwards, so these numbers and the
+  // frame's own luma are in different domains; comparing them is the point.
+  if (esp_video_isp_pipeline_start_dump_stats(4) != ESP_OK) {
+    ESP_LOGW(TAG, "could not start the ISP statistics queue");
+    return;
+  }
+  for (int n = 0; n < 8; n++) {
+    // Frames have to keep flowing for statistics to arrive, and a session that
+    // has just opened starts at the sensor's default exposure, so the first
+    // rounds show auto exposure climbing rather than where it settles. Each
+    // round is about two thirds of a second of frames.
+    const uint32_t frame_luma = this->measure_luma_(20);
+    esp_video_isp_stats_t stats = {};
+    if (esp_video_isp_pipeline_dump_stats(&stats, 500) != ESP_OK) {
+      ESP_LOGW(TAG, "no ISP statistics within 500 ms");
+      break;
+    }
+    if ((stats.flags & ESP_VIDEO_ISP_STATS_FLAG_AE) == 0) {
+      ESP_LOGW(TAG, "ISP statistics carry no AE data (flags 0x%08X)", (unsigned) stats.flags);
+      continue;
+    }
+    int sum = 0, lo = INT32_MAX, hi = 0;
+    char grid[ISP_AE_BLOCK_X_NUM * 8 + 1];
+    size_t used = 0;
+    for (int y = 0; y < ISP_AE_BLOCK_Y_NUM; y++) {
+      for (int x = 0; x < ISP_AE_BLOCK_X_NUM; x++) {
+        const int v = stats.ae.ae_result.luminance[x][y];
+        sum += v;
+        lo = v < lo ? v : lo;
+        hi = v > hi ? v : hi;
+      }
+    }
+    const int blocks = ISP_AE_BLOCK_X_NUM * ISP_AE_BLOCK_Y_NUM;
+    if (n == 7) {
+      for (int y = 0; y < ISP_AE_BLOCK_Y_NUM; y++) {
+        used = 0;
+        for (int x = 0; x < ISP_AE_BLOCK_X_NUM; x++)
+          used += snprintf(grid + used, sizeof(grid) - used, "%6d", stats.ae.ae_result.luminance[x][y]);
+        ESP_LOGI(TAG, "ae stats:   %s", grid);
+      }
+    }
+    ESP_LOGI(TAG, "ae stats: round %d: metered mean %d (min %d, max %d of 25 blocks), frame luma %u", n + 1,
+             sum / blocks, lo, hi, (unsigned) frame_luma);
+
+    // The histogram and white-balance blocks meter the same window. If those
+    // look like the scene while AE reads nothing, the window is fine and the
+    // AE block is the problem.
+    if (n == 7 && (stats.flags & ESP_VIDEO_ISP_STATS_FLAG_HIST)) {
+      char bins[ISP_HIST_SEGMENT_NUMS * 9 + 1];
+      size_t at = 0;
+      uint32_t total = 0;
+      for (int i = 0; i < ISP_HIST_SEGMENT_NUMS; i++) {
+        at += snprintf(bins + at, sizeof(bins) - at, "%u ", (unsigned) stats.hist.hist_result.hist_value[i]);
+        total += stats.hist.hist_result.hist_value[i];
+      }
+      ESP_LOGI(TAG, "hist stats: %u pixels over 16 bins: %s", (unsigned) total, bins);
+    }
+    if (n == 7 && (stats.flags & ESP_VIDEO_ISP_STATS_FLAG_AWB)) {
+      const uint32_t n = stats.awb.awb_result.white_patch_num;
+      ESP_LOGI(TAG, "awb stats: %u white patches, mean R %u G %u B %u", (unsigned) n,
+               (unsigned) (n ? stats.awb.awb_result.sum_r / n : 0), (unsigned) (n ? stats.awb.awb_result.sum_g / n : 0),
+               (unsigned) (n ? stats.awb.awb_result.sum_b / n : 0));
+    }
+  }
+  esp_video_isp_pipeline_stop_dump_stats();
+
+  struct v4l2_ext_control ctl[2] = {};
+  struct v4l2_ext_controls ctls = {};
+  ctl[0].id = V4L2_CID_EXPOSURE_ABSOLUTE;
+  ctl[1].id = V4L2_CID_GAIN;
+  ctls.ctrl_class = V4L2_CTRL_CLASS_CAMERA;
+  ctls.count = 1;
+  ctls.controls = &ctl[0];
+  const bool have_exp = ioctl(this->cap_fd_, VIDIOC_G_EXT_CTRLS, &ctls) == 0;
+  ctls.ctrl_class = V4L2_CTRL_CLASS_USER;
+  ctls.controls = &ctl[1];
+  const bool have_gain = ioctl(this->cap_fd_, VIDIOC_G_EXT_CTRLS, &ctls) == 0;
+  uint32_t ceiling_us = 0, floor_us = 0;
+  esp_video_isp_pipeline_get_agc_max_exposure(&ceiling_us);
+  esp_video_isp_pipeline_get_agc_min_exposure(&floor_us);
+  ESP_LOGI(TAG, "ae stats: exposure %s%ld lines, gain index %s%ld, allowed %u..%u us", have_exp ? "" : "?",
+           (long) ctl[0].value, have_gain ? "" : "?", (long) ctl[1].value, (unsigned) floor_us,
+           (unsigned) ceiling_us);
   this->last_request_ms_ = millis();
 }
 
@@ -624,6 +749,10 @@ bool P4CsiCamera::open_session_() {
   }
 
   this->session_frames_ = 0;
+  this->ae_settled_ = false;
+  this->settle_stable_ = 0;
+  this->settle_exposure_ = 0;
+  this->settle_gain_ = 0;
   this->session_errors_ = 0;
 
   if (!this->open_encoder_()) {
@@ -955,11 +1084,22 @@ int P4CsiCamera::grab_frame_(Frame *out, bool want_jpeg) {
     }
     this->session_frames_++;
 
-    // The first frames after STREAMON are at whatever exposure the sensor
-    // woke up with; give auto exposure a few to converge.
-    if (this->session_frames_ <= (uint32_t) this->settle_frames_) {
-      ioctl(fd, VIDIOC_QBUF, &buf);
-      continue;
+    // Auto exposure restarts from the sensor's defaults at every STREAMON,
+    // and it overshoots to the end of its range before it comes back: a frame
+    // taken during that is blown white in daylight and black in a dim room,
+    // which is what made stills look nothing like the scene. So frames are
+    // dropped until the sensor's own exposure and gain registers stop moving,
+    // and settle_frames is only the cap on how long that may take.
+    if (!this->ae_settled_) {
+      const bool timed_out = this->session_frames_ >= (uint32_t) this->settle_frames_;
+      if (!this->ae_has_settled_() && !timed_out) {
+        ioctl(fd, VIDIOC_QBUF, &buf);
+        continue;
+      }
+      this->ae_settled_ = true;
+      ESP_LOGI(TAG, "auto exposure settled after %u frames: exposure %u lines, digital gain 0x%04X%s",
+               (unsigned) this->session_frames_, (unsigned) this->settle_exposure_,
+               (unsigned) this->settle_gain_, timed_out ? " (gave up waiting)" : "");
     }
 
     const uint8_t *data = this->cap_mem_[buf.index];

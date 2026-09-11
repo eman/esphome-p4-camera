@@ -90,12 +90,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_RESOLUTION, default="1920x1080"): cv.enum(RESOLUTIONS, lower=True),
             # Ceiling on frames handed to the API while streaming.
             cv.Optional(CONF_MAX_FRAMERATE, default="3 fps"): cv.framerate,
-            # Frames discarded after the stream starts, so auto exposure has
-            # settled before the first one is kept. ~33 ms each. The ISP
-            # pipeline restarts exposure and gain from its defaults every time
-            # the stream starts, and in a dim room it needs the better part of
-            # a second to climb to the right gain.
-            cv.Optional(CONF_SETTLE_FRAMES, default=24): cv.int_range(min=0, max=90),
+            # Cap on the frames discarded while auto exposure settles. The
+            # component watches the sensor's exposure and gain registers and
+            # keeps the first frame after they stop moving, so this only bounds
+            # the wait: about 80 frames in a dim room, a handful in daylight.
+            # Frames are 33 ms at 30 fps, longer once the exposure stretches.
+            cv.Optional(CONF_SETTLE_FRAMES, default=150): cv.int_range(min=0, max=600),
             # Longest exposure auto exposure may use. The sensor runs at 30 fps
             # until exposure exceeds a frame (33 ms), then stretches the frame,
             # so this is also the frame rate floor in a dim room: 100 ms is
