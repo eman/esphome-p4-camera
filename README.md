@@ -165,6 +165,30 @@ the encoder works and the two serialise: measured with the H.264 encoder at
 whichever is slower sets the rate: 11.3 frames a second, the encoder's. The
 extra buffers are 3 MB each and live in PSRAM.
 
+### Smaller frames, and why there is no scaling option
+
+The H.264 encoder's cost goes with the pixel count: 83 ms for a 1080p frame on
+this board against 38 ms for the sensor's 1288×728 mode, which is the
+difference between 11 and 15 frames a second out of the RTSP component. But
+`resolution: 1288x728` is a **centre crop**, not a downscale. Its register
+table reads columns 320–1615 and rows 180–911 of the array with the same
+binning as the full mode, so a third of the view goes in each direction. That
+is a real choice to make, not a free win.
+
+There is no way on this silicon to get the whole scene at a smaller size:
+
+- the sensor has no binned mode (the Linux driver exposes 1928×1092 and
+  nothing else);
+- the ESP32-P4's ISP crops but does not scale;
+- the pixel processing accelerator scales, and will read this YUV 4:2:0 - it
+  is what converts stills to RGB565 - but asking it for **YUV 4:2:0 out**
+  submits a transaction that never completes. Same client, same buffers, same
+  blocking call that works for RGB565 out; the driver validates the request
+  and the hardware never raises done. Tried on chip revision v1.3, where the
+  accelerator's YUV422 and GRAY8 modes are also compiled out as v3.0-only. So
+  no scaling option is offered here rather than one that wedges the capture
+  task.
+
 ## Two things that cost days, recorded so they do not cost yours
 
 - **ESP-IDF 5.5.5's ISP driver logs its error interrupts from inside the
