@@ -180,6 +180,18 @@ There is no way on this silicon to get the whole scene at a smaller size:
 - the sensor has no binned mode (the Linux driver exposes 1928×1092 and
   nothing else);
 - the ESP32-P4's ISP crops but does not scale;
+- the sensor's own 720p is a crop by OmniVision's specification, not by this
+  driver's choice: the product brief lists "1280x720 60 fps **cropped**" and
+  offers binning only at 640x480. Adding a 720p mode here would reproduce the
+  crop, not avoid it;
+- 2×2 binning would give the whole scene at a quarter of the pixels, but no
+  register table for it is public. Mainline Linux, Intel's IPU6 driver and
+  both Espressif revisions expose the full readout and nothing else, and the
+  datasheet is not published. The obvious guess - bit 0 of the registers that
+  carry flip and mirror in bit 1, which is where several OmniVision parts put
+  the binning enables - was tried on the module: the sensor accepts
+  `0x3820 = 0xA1` and `0x3821 = 0x01`, reads them back, and the picture does
+  not change;
 - the pixel processing accelerator scales, and will read this YUV 4:2:0 - it
   is what converts stills to RGB565 - but asking it for **YUV 4:2:0 out**
   submits a transaction that never completes. Same client, same buffers, same
